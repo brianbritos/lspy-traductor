@@ -1,3 +1,4 @@
+#collect_data.py
 import cv2
 import mediapipe as mp
 import pandas as pd

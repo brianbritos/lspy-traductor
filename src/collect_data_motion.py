@@ -1,3 +1,4 @@
+#collect_data_motion.py
 import cv2
 import mediapipe as mp
 import pandas as pd
