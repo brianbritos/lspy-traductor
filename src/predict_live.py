@@ -1,27 +1,28 @@
-#predict_live.py
+# === predict_live.py (mejorado para manejar señas estáticas y dinámicas) ===
 import cv2
 import mediapipe as mp
 import joblib
 import numpy as np
 import os
+import collections
 
 MODEL_PATH = r"C:\Users\brian\Documents\proyecto\model.pkl"
 
-# Verificar que el modelo existe
 if not os.path.exists(MODEL_PATH):
     print(f"No se encontró el modelo en: {MODEL_PATH}")
-    input("Presiona una tecla para salir...")
+    input("Presioná una tecla para salir...")
     exit()
 
-# Cargar modelo
 model = joblib.load(MODEL_PATH)
 
-# Inicializar MediaPipe
 mp_hands = mp.solutions.hands
 hands = mp_hands.Hands()
 cap = cv2.VideoCapture(0)
 
 print("Mostrá una seña a la cámara. Presioná ESC para salir.")
+
+# Almacenamiento de historial para predicción de movimiento
+frame_buffer = collections.deque(maxlen=15)  # ~0.5 segundos a 30fps
 
 while True:
     ret, frame = cap.read()
@@ -31,39 +32,27 @@ while True:
     frame = cv2.flip(frame, 1)
     results = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
+    keypoints = None
     if results.multi_hand_landmarks:
         hand_landmarks = results.multi_hand_landmarks[0]
-
         if len(hand_landmarks.landmark) == 21:
-            try:
-                keypoints = []
-                for lm in hand_landmarks.landmark:
-                    keypoints.extend([lm.x, lm.y, lm.z])
+            keypoints = [c for lm in hand_landmarks.landmark for c in (lm.x, lm.y, lm.z)]
+            frame_buffer.append(keypoints)
 
-                # Validación geométrica segura: índice y pulgar
-                index_tip = hand_landmarks.landmark[8]
-                thumb_tip = hand_landmarks.landmark[4]
+    prediction = "..."
+    color = (100, 100, 100)
 
-                distance = np.linalg.norm([
-                    index_tip.x - thumb_tip.x,
-                    index_tip.y - thumb_tip.y,
-                    index_tip.z - thumb_tip.z
-                ])
+    if len(frame_buffer) >= 10:
+        # Seña dinámica: promedio de los últimos frames
+        averaged = np.mean(frame_buffer, axis=0).reshape(1, -1)
+        try:
+            prediction = model.predict(averaged)[0]
+            color = (0, 255, 0)
+        except Exception as e:
+            print(f"⚠️ Error en predicción: {e}")
 
-                # Solo predecir si hay separación significativa
-                if distance > 0.05:
-                    prediction = model.predict([keypoints])[0]
-                    cv2.putText(frame, f"Seña: {prediction}", (10, 30),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-
-            except Exception as e:
-                print(f"⚠️ Error en validación: {e}")
-        else:
-            print("⚠️ Mano detectada, pero sin los 21 puntos.")
-    else:
-        # Nada detectado, no hay predicción
-        pass
-
+    cv2.putText(frame, f"Seña: {prediction}", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
     cv2.imshow("Predicción en Vivo", frame)
 
     if cv2.waitKey(5) & 0xFF == 27:

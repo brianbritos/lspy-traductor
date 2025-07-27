@@ -1,0 +1,67 @@
+Versión 0.3
+
+Implementaciones
+1. Validación geométrica (postprocesamiento)
+Agregamos una etapa después de la predicción para verificar que la predicción tenga sentido geométricamente.
+
+Ejemplo para “L”: verificar que solo el pulgar e índice estén extendidos.
+
+Cómo hacerlo:
+
+Calcular las distancias entre la punta de cada dedo y la muñeca.
+
+Normalizar distancias (por tamaño de mano).
+
+Aplicar condiciones como:
+
+	Índice y pulgar > umbral.
+
+	Otros dedos < umbral.
+Paso 1: Añadir validación geométrica en predict_live.py
+
+def is_l_shape(landmarks):
+    # Coordenadas de los dedos
+    index_tip = landmarks[8]
+    index_mcp = landmarks[5]
+    thumb_tip = landmarks[4]
+    thumb_cmc = landmarks[1]
+
+    # Medir distancias relativas
+    def distance(p1, p2):
+        return ((p1.x - p2.x)**2 + (p1.y - p2.y)**2)**0.5
+
+    # Comparar extensiones
+    index_extended = distance(index_tip, index_mcp) > 0.15
+    thumb_extended = distance(thumb_tip, thumb_cmc) > 0.15
+
+    # Omitimos el resto de los dedos en esta validación básica
+    return index_extended and thumb_extended
+
+# En predict_live.py, justo antes de hacer predicción
+hand_landmarks = results.multi_hand_landmarks[0]
+if not is_l_shape(hand_landmarks.landmark):
+    continue  # Saltar predicción si no cumple con forma de "L"
+
+
+2. Aumento de datos (data augmentation)
+Como te había comentado, para aumentar la robustez del modelo podemos generar variaciones sintéticas de cada muestra capturada. Por ejemplo, a cada set de coordenadas de la mano le aplicamos pequeñas transformaciones para simular variabilidad natural, como:
+
+Pequeñas traslaciones (mover toda la mano un poco en X/Y/Z)
+
+Pequeñas rotaciones
+
+Escalados leves (cambios en tamaño)
+
+Ruido gaussiano muy suave
+
+Esto ayuda a que el modelo aprenda mejor las señas ante variaciones en posición, distancia o ángulo.
+
+Explicación rápida:
+Cada vez que capturás una muestra (cuando apretás espacio), se guarda la original más 3 muestras aumentadas con pequeñas variaciones.
+
+Esto multiplica tu dataset aproximadamente por 4.
+
+La función augment_sample() crea estas variaciones simulando movimientos naturales o ruido de la mano.
+
+
+
