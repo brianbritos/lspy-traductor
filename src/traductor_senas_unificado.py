@@ -1,6 +1,32 @@
-# traductor_senas_unificado.py
-import os
+
+import subprocess
 import sys
+
+def instalar_paquete(paquete):
+    print(f"Verificando / instalando paquete: {paquete} ...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", paquete])
+
+def verificar_requisitos():
+    import importlib
+    paquetes = [
+        "numpy",
+        "pandas",
+        "scikit-learn",
+        "mediapipe",
+        "opencv-python",
+        "joblib"
+    ]
+    for paquete in paquetes:
+        try:
+            importlib.import_module(paquete)
+            print(f"{paquete} ya está instalado.")
+        except ImportError:
+            instalar_paquete(paquete)
+
+# Verificamos al iniciar el programa
+verificar_requisitos()
+
+import os
 import time
 import cv2
 import numpy as np
@@ -20,7 +46,7 @@ import mediapipe as mp
 def get_base_path():
     if getattr(sys, 'frozen', False):
         return sys._MEIPASS
-    return os.path.dirname(os.path.abspath(_file_))
+    return os.path.dirname(os.path.abspath(__file__))
 
 BASE_PATH = get_base_path()
 DATA_DIR = os.path.join(BASE_PATH, "data")         # aquí guardamos CSV y subcarpetas dinámicas
@@ -59,7 +85,7 @@ def capturar_estaticas():
         print("No se pudo abrir la cámara.")
         return
 
-    hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1,
+    hands = mp_hands.Hands(static_image_mode=False, max_num_hands=2,
                            min_detection_confidence=0.6, min_tracking_confidence=0.5)
 
     OUTPUT_DIR = DATA_DIR  # guardamos un CSV por etiqueta en data/
@@ -86,9 +112,22 @@ def capturar_estaticas():
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = hands.process(rgb)
 
-        # Mostrar landmarks si detecta
+        # Elegir mano más cercana y centrada (si detecta más de una)
+        hand_landmarks = None
+        min_dist_score = float('inf')
         if results.multi_hand_landmarks:
-            mp_drawing.draw_landmarks(frame, results.multi_hand_landmarks[0], mp_hands.HAND_CONNECTIONS)
+            for hand in results.multi_hand_landmarks:
+                # Centro de la mano: promedio de x,y
+                xs = [lm.x for lm in hand.landmark]
+                ys = [lm.y for lm in hand.landmark]
+                center_x, center_y = np.mean(xs), np.mean(ys)
+                # Distancia a centro (0.5, 0.5) y profundidad (z)
+                z_mean = np.mean([lm.z for lm in hand.landmark])
+                dist_score = ((center_x - 0.5)**2 + (center_y - 0.5)**2)**0.5 + abs(z_mean)
+                if dist_score < min_dist_score:
+                    min_dist_score = dist_score
+                    hand_landmarks = hand
+            mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
 
         cv2.putText(frame, f"Guardadas: {muestras_guardadas}/{NUM_SAMPLES}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
@@ -112,11 +151,22 @@ def capturar_estaticas():
                 if not r_b.multi_hand_landmarks:
                     ok = False
                     break
-                lms = r_b.multi_hand_landmarks[0].landmark
-                if len(lms) != 21:
+                # Elegir mano más cercana y centrada otra vez
+                hand_b = None
+                min_dist_b = float('inf')
+                for hand in r_b.multi_hand_landmarks:
+                    xs = [lm.x for lm in hand.landmark]
+                    ys = [lm.y for lm in hand.landmark]
+                    center_x, center_y = np.mean(xs), np.mean(ys)
+                    z_mean = np.mean([lm.z for lm in hand.landmark])
+                    dist_score = ((center_x - 0.5)**2 + (center_y - 0.5)**2)**0.5 + abs(z_mean)
+                    if dist_score < min_dist_b:
+                        min_dist_b = dist_score
+                        hand_b = hand
+                if hand_b is None or len(hand_b.landmark) != 21:
                     ok = False
                     break
-                kp = [c for lm in lms for c in (lm.x, lm.y, lm.z)]
+                kp = [c for lm in hand_b.landmark for c in (lm.x, lm.y, lm.z)]
                 burst.append(kp)
                 cv2.imshow("Verificando estabilidad", f_b)
                 cv2.waitKey(30)
@@ -184,7 +234,7 @@ def capturar_dinamicas():
         print("No se pudo abrir la cámara.")
         return
 
-    hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1,
+    hands = mp_hands.Hands(static_image_mode=False, max_num_hands=2,
                            min_detection_confidence=0.6, min_tracking_confidence=0.5)
 
     muestras_guardadas = 0
@@ -223,17 +273,33 @@ def capturar_dinamicas():
                 res = hands.process(cv2.cvtColor(f2, cv2.COLOR_BGR2RGB))
                 total += 1
 
-                if res.multi_hand_landmarks and len(res.multi_hand_landmarks[0].landmark) == 21:
-                    kp = [c for lm in res.multi_hand_landmarks[0].landmark for c in (lm.x, lm.y, lm.z)]
+                # Mano más cercana y centrada
+                hand_b = None
+                min_dist_b = float('inf')
+                if res.multi_hand_landmarks:
+                    for hand in res.multi_hand_landmarks:
+                        xs = [lm.x for lm in hand.landmark]
+                        ys = [lm.y for lm in hand.landmark]
+                        center_x, center_y = np.mean(xs), np.mean(ys)
+                        z_mean = np.mean([lm.z for lm in hand.landmark])
+                        dist_score = ((center_x - 0.5)**2 + (center_y - 0.5)**2)**0.5 + abs(z_mean)
+                        if dist_score < min_dist_b:
+                            min_dist_b = dist_score
+                            hand_b = hand
+                if hand_b and len(hand_b.landmark) == 21:
+                    kp = [c for lm in hand_b.landmark for c in (lm.x, lm.y, lm.z)]
                     seq.append(kp)
                     validos += 1
-                    mp_drawing.draw_landmarks(f2, res.multi_hand_landmarks[0], mp_hands.HAND_CONNECTIONS)
+                    mp_drawing.draw_landmarks(f2, hand_b, mp_hands.HAND_CONNECTIONS)
 
                 cv2.putText(f2, f"Grabando secuencia... {total}/{frames_per_seq}", (10, 30),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
                 cv2.imshow("Captura Dinámica", f2)
                 if cv2.waitKey(1) & 0xFF == 27:
-                    break
+                    print("Cancelado por el usuario.")
+                    cap.release()
+                    cv2.destroyAllWindows()
+                    return
 
             # Validación: al menos 80% frames válidos
             ratio = (validos / total) if total > 0 else 0
@@ -390,74 +456,94 @@ def predecir_en_vivo():
         print("No se pudo abrir la cámara.")
         return
 
-    hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1,
+    hands = mp_hands.Hands(static_image_mode=False, max_num_hands=2,
                            min_detection_confidence=0.6, min_tracking_confidence=0.5)
 
     frame_buffer = collections.deque(maxlen=15)
     print("Mostrá una seña a la cámara. Presioná ESC para salir.")
 
     cv2.namedWindow("Predicción en Vivo", cv2.WINDOW_NORMAL)
+
+    CONF_THRESHOLD = 0.7
+
     while True:
         ret, frame = cap.read()
         if not ret:
             continue
         frame = cv2.flip(frame, 1)
-        res = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        res = hands.process(rgb_frame)
 
-        if res.multi_hand_landmarks and len(res.multi_hand_landmarks[0].landmark) == 21:
-            kp = [c for lm in res.multi_hand_landmarks[0].landmark for c in (lm.x, lm.y, lm.z)]
-            frame_buffer.append(kp)
+        if res.multi_hand_landmarks:
+            best_hand = seleccionar_mano_prioritaria(res.multi_hand_landmarks, frame.shape)
+            if len(best_hand.landmark) == 21:
+                kp = [c for lm in best_hand.landmark for c in (lm.x, lm.y, lm.z)]
+                frame_buffer.append(kp)
 
-            mp_drawing.draw_landmarks(frame, res.multi_hand_landmarks[0], mp_hands.HAND_CONNECTIONS)
+            mp_drawing.draw_landmarks(frame, best_hand, mp_hands.HAND_CONNECTIONS)
+        else:
+            frame_buffer.clear()
 
-        prediction = "..."
-        color = (150,150,150)
+        prediction = ""
+        color = (150, 150, 150)
+
         if len(frame_buffer) >= 10:
             arr = np.mean(frame_buffer, axis=0).reshape(1, -1)
             try:
-                prediction = model.predict(arr)[0]
-                color = (0,255,0)
+                proba = model.predict_proba(arr)[0]
+                max_proba = max(proba)
+                pred_class = model.classes_[np.argmax(proba)]
+
+                if max_proba >= CONF_THRESHOLD:
+                    prediction = pred_class
+                    color = (0, 255, 0)
+                else:
+                    prediction = ""
+
             except Exception as e:
                 print(f"⚠ Error en predicción: {e}")
 
-        cv2.putText(frame, f"Seña: {prediction}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+        if prediction:
+            cv2.putText(frame, f"Seña: {prediction}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+        else:
+            cv2.putText(frame, "Seña: --", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (100, 100, 100), 2)
+
         cv2.imshow("Predicción en Vivo", frame)
 
-        if cv2.waitKey(5) & 0xFF == 27:
+        key = cv2.waitKey(5) & 0xFF
+        if key == 27:  # ESC para salir
+            print("Saliendo del modo predicción...")
             break
 
     cap.release()
     cv2.destroyAllWindows()
 
 # ----------------------------
-# MENÚ PRINCIPAL
+# MENU PRINCIPAL
 # ----------------------------
 def menu():
     while True:
-        print("\n=== TRADUCTOR DE SEÑAS (LSPy) ===")
-        print("1) Capturar señas estáticas")
-        print("2) Capturar señas dinámicas (movimiento)")
-        print("3) Cargar datos estáticos (selección y confirmación)")
-        print("4) Entrenar modelo (usa estáticos y dinámicos)")
-        print("5) Predicción en vivo")
-        print("6) Salir")
-        choice = input("Elegí opción: ").strip()
+        print("\n=== MENÚ ===")
+        print("1. Capturar muestras estáticas")
+        print("2. Capturar muestras dinámicas")
+        print("3. Entrenar modelo")
+        print("4. Predicción en vivo")
+        print("0. Salir")
+        opt = input("Elegí una opción: ").strip()
 
-        if choice == '1':
+        if opt == "1":
             capturar_estaticas()
-        elif choice == '2':
+        elif opt == "2":
             capturar_dinamicas()
-        elif choice == '3':
-            _ = cargar_datos_estaticos()
-        elif choice == '4':
+        elif opt == "3":
             entrenar_modelo()
-        elif choice == '5':
+        elif opt == "4":
             predecir_en_vivo()
-        elif choice == '6':
-            print("Saliendo. ¡Éxitos con el proyecto!")
+        elif opt == "0":
+            print("Saliendo...")
             break
         else:
             print("Opción inválida.")
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     menu()
