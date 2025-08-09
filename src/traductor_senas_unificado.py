@@ -1,13 +1,28 @@
-
+import importlib
 import subprocess
 import sys
+import os
+import time
+import cv2
+import numpy as np
+import pandas as pd
+import joblib
+import collections
 
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+
+import mediapipe as mp
+
+# ----------------------------
+# Función para instalar librerías si no están
+# ----------------------------
 def instalar_paquete(paquete):
     print(f"Verificando / instalando paquete: {paquete} ...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", paquete])
 
 def verificar_requisitos():
-    import importlib
     paquetes = [
         "numpy",
         "pandas",
@@ -26,20 +41,6 @@ def verificar_requisitos():
 # Verificamos al iniciar el programa
 verificar_requisitos()
 
-import os
-import time
-import cv2
-import numpy as np
-import pandas as pd
-import joblib
-import collections
-
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report
-
-import mediapipe as mp
-
 # ----------------------------
 # RUTAS SEGURAS (funciona .py y .exe)
 # ----------------------------
@@ -49,8 +50,8 @@ def get_base_path():
     return os.path.dirname(os.path.abspath(__file__))
 
 BASE_PATH = get_base_path()
-DATA_DIR = os.path.join(BASE_PATH, "data")         # aquí guardamos CSV y subcarpetas dinámicas
-MODEL_PATH = os.path.join(BASE_PATH, "model.pkl")  # donde se guardará el modelo
+DATA_DIR = os.path.join(BASE_PATH, "data")         # carpeta para CSVs
+MODEL_PATH = os.path.join(BASE_PATH, "model.pkl")  # modelo guardado
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -69,6 +70,23 @@ def read_csv_safe(path):
     except Exception as e:
         print(f"Error leyendo {path}: {e}")
         return None
+
+# ----------------------------
+# Función para elegir mano más centrada y cercana
+# ----------------------------
+def seleccionar_mano_prioritaria(manos_detectadas, frame_shape=None):
+    best_hand = None
+    min_dist_score = float('inf')
+    for hand in manos_detectadas:
+        xs = [lm.x for lm in hand.landmark]
+        ys = [lm.y for lm in hand.landmark]
+        center_x, center_y = np.mean(xs), np.mean(ys)
+        z_mean = np.mean([lm.z for lm in hand.landmark])
+        dist_score = ((center_x - 0.5) ** 2 + (center_y - 0.5) ** 2) ** 0.5 + abs(z_mean)
+        if dist_score < min_dist_score:
+            min_dist_score = dist_score
+            best_hand = hand
+    return best_hand
 
 # ----------------------------
 # FUNCIONES: captura estática
@@ -112,18 +130,15 @@ def capturar_estaticas():
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = hands.process(rgb)
 
-        # Elegir mano más cercana y centrada (si detecta más de una)
         hand_landmarks = None
         min_dist_score = float('inf')
         if results.multi_hand_landmarks:
             for hand in results.multi_hand_landmarks:
-                # Centro de la mano: promedio de x,y
                 xs = [lm.x for lm in hand.landmark]
                 ys = [lm.y for lm in hand.landmark]
                 center_x, center_y = np.mean(xs), np.mean(ys)
-                # Distancia a centro (0.5, 0.5) y profundidad (z)
                 z_mean = np.mean([lm.z for lm in hand.landmark])
-                dist_score = ((center_x - 0.5)**2 + (center_y - 0.5)**2)**0.5 + abs(z_mean)
+                dist_score = ((center_x - 0.5) ** 2 + (center_y - 0.5) ** 2) ** 0.5 + abs(z_mean)
                 if dist_score < min_dist_score:
                     min_dist_score = dist_score
                     hand_landmarks = hand
@@ -138,7 +153,6 @@ def capturar_estaticas():
         key = cv2.waitKey(1) & 0xFF
 
         if key == ord('c'):
-            # Recopilar 10 frames consecutivos y comprobar estabilidad
             burst = []
             ok = True
             for _ in range(10):
@@ -151,7 +165,6 @@ def capturar_estaticas():
                 if not r_b.multi_hand_landmarks:
                     ok = False
                     break
-                # Elegir mano más cercana y centrada otra vez
                 hand_b = None
                 min_dist_b = float('inf')
                 for hand in r_b.multi_hand_landmarks:
@@ -159,7 +172,7 @@ def capturar_estaticas():
                     ys = [lm.y for lm in hand.landmark]
                     center_x, center_y = np.mean(xs), np.mean(ys)
                     z_mean = np.mean([lm.z for lm in hand.landmark])
-                    dist_score = ((center_x - 0.5)**2 + (center_y - 0.5)**2)**0.5 + abs(z_mean)
+                    dist_score = ((center_x - 0.5) ** 2 + (center_y - 0.5) ** 2) ** 0.5 + abs(z_mean)
                     if dist_score < min_dist_b:
                         min_dist_b = dist_score
                         hand_b = hand
@@ -175,10 +188,9 @@ def capturar_estaticas():
                 print("Mano inestable o puntos incompletos. Repetí.")
                 continue
 
-            # comprobación de estabilidad (varianza pequeña)
             arr = np.array(burst)
             var_mean = np.var(arr, axis=0).mean()
-            if var_mean > 0.0015:   # umbral ajustable
+            if var_mean > 0.0015:
                 print("⚠ Movimiento detectado (no estable). Repetí la captura.")
                 continue
 
@@ -187,7 +199,7 @@ def capturar_estaticas():
             muestras_guardadas += 1
             print(f"Captura válida guardada ({muestras_guardadas}/{NUM_SAMPLES}).")
 
-        elif key == 27:  # ESC
+        elif key == 27:
             print("Cancelado por el usuario.")
             break
 
@@ -196,8 +208,8 @@ def capturar_estaticas():
 
     if samples:
         df = pd.DataFrame(samples)
+        df.columns = COLUMN_NAMES[:-1]  # sólo features
         df['label'] = label
-        # Si existe previamente, concatenar
         if os.path.exists(output_path):
             try:
                 prev = pd.read_csv(output_path)
@@ -244,7 +256,7 @@ def capturar_dinamicas():
     print(" - Presioná ESC para cancelar.\n")
 
     cv2.namedWindow("Captura Dinámica", cv2.WINDOW_NORMAL)
-    frames_per_seq = max(1, int(DURATION * 30))  # asumiendo ~30fps
+    frames_per_seq = max(1, int(DURATION * 30))
 
     while muestras_guardadas < NUM_SAMPLES:
         ret, frame = cap.read()
@@ -273,7 +285,6 @@ def capturar_dinamicas():
                 res = hands.process(cv2.cvtColor(f2, cv2.COLOR_BGR2RGB))
                 total += 1
 
-                # Mano más cercana y centrada
                 hand_b = None
                 min_dist_b = float('inf')
                 if res.multi_hand_landmarks:
@@ -282,7 +293,7 @@ def capturar_dinamicas():
                         ys = [lm.y for lm in hand.landmark]
                         center_x, center_y = np.mean(xs), np.mean(ys)
                         z_mean = np.mean([lm.z for lm in hand.landmark])
-                        dist_score = ((center_x - 0.5)**2 + (center_y - 0.5)**2)**0.5 + abs(z_mean)
+                        dist_score = ((center_x - 0.5) ** 2 + (center_y - 0.5) ** 2) ** 0.5 + abs(z_mean)
                         if dist_score < min_dist_b:
                             min_dist_b = dist_score
                             hand_b = hand
@@ -301,7 +312,6 @@ def capturar_dinamicas():
                     cv2.destroyAllWindows()
                     return
 
-            # Validación: al menos 80% frames válidos
             ratio = (validos / total) if total > 0 else 0
             if ratio >= 0.8 and len(seq) > 0:
                 filename = os.path.join(OUTPUT_DIR, f"sample_{muestras_guardadas+1}.csv")
@@ -320,7 +330,7 @@ def capturar_dinamicas():
     print("Captura dinámica finalizada.")
 
 # ----------------------------
-# FUNCIONES: cargar datos estáticos con confirmación
+# Cargar datos estáticos con confirmación
 # ----------------------------
 def cargar_datos_estaticos():
     files = sorted([f for f in os.listdir(DATA_DIR) if f.endswith(".csv") and os.path.isfile(os.path.join(DATA_DIR, f))])
@@ -357,7 +367,6 @@ def cargar_datos_estaticos():
         df = read_csv_safe(p)
         if df is None:
             continue
-        # Validar formato: debe tener 'label' y 63 features
         if 'label' in df.columns and df.shape[1] == EXPECTED_FEATURES + 1:
             df.columns = COLUMN_NAMES
             all_df.append(df)
@@ -373,18 +382,16 @@ def cargar_datos_estaticos():
     return combined
 
 # ----------------------------
-# FUNCIONES: entrenar modelo (une estático y dinámico)
+# Entrenar modelo (une estático y dinámico)
 # ----------------------------
 def entrenar_modelo():
     print("Iniciando proceso de preparación de datos para entrenamiento...")
 
-    # 1) Cargar estáticos si el usuario quiere
     use_stat = input("¿Querés cargar archivos estáticos ahora? (s/n): ").strip().lower()
     static_df = pd.DataFrame()
     if use_stat == 's':
         static_df = cargar_datos_estaticos() or pd.DataFrame()
 
-    # 2) Buscar carpetas dinámicas (subcarpetas en data/)
     dynamic_rows = []
     for entry in os.listdir(DATA_DIR):
         folder = os.path.join(DATA_DIR, entry)
@@ -404,7 +411,6 @@ def entrenar_modelo():
 
     dynamic_df = pd.DataFrame(dynamic_rows, columns=COLUMN_NAMES) if dynamic_rows else pd.DataFrame()
 
-    # 3) Combinar
     pieces = []
     if not static_df.empty:
         pieces.append(static_df)
@@ -417,7 +423,6 @@ def entrenar_modelo():
 
     dataset = pd.concat(pieces, ignore_index=True)
 
-    # Validación final
     if dataset.shape[1] != EXPECTED_FEATURES + 1:
         print(f"Dataset combinado tiene {dataset.shape[1]} columnas. Se esperan {EXPECTED_FEATURES+1}.")
         return
@@ -438,19 +443,14 @@ def entrenar_modelo():
     print(f"Modelo guardado en: {MODEL_PATH}")
 
 # ----------------------------
-# FUNCIONES: predicción en vivo
+# Predicción en vivo
 # ----------------------------
 def predecir_en_vivo():
     if not os.path.exists(MODEL_PATH):
         print("No se encontró el modelo. Entrená primero.")
         return
 
-    try:
-        model = joblib.load(MODEL_PATH)
-    except Exception as e:
-        print(f"⚠ Error cargando el modelo: {e}")
-        return
-
+    model = joblib.load(MODEL_PATH)
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("No se pudo abrir la cámara.")
@@ -459,91 +459,61 @@ def predecir_en_vivo():
     hands = mp_hands.Hands(static_image_mode=False, max_num_hands=2,
                            min_detection_confidence=0.6, min_tracking_confidence=0.5)
 
-    frame_buffer = collections.deque(maxlen=15)
-    print("Mostrá una seña a la cámara. Presioná ESC para salir.")
-
-    cv2.namedWindow("Predicción en Vivo", cv2.WINDOW_NORMAL)
-
-    CONF_THRESHOLD = 0.7
+    print("Iniciando predicción en vivo. Presiona ESC para salir.")
+    cv2.namedWindow("Predicción en vivo", cv2.WINDOW_NORMAL)
 
     while True:
         ret, frame = cap.read()
         if not ret:
             continue
         frame = cv2.flip(frame, 1)
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        res = hands.process(rgb_frame)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        res = hands.process(rgb)
 
         if res.multi_hand_landmarks:
             best_hand = seleccionar_mano_prioritaria(res.multi_hand_landmarks, frame.shape)
-            if len(best_hand.landmark) == 21:
+            if best_hand:
                 kp = [c for lm in best_hand.landmark for c in (lm.x, lm.y, lm.z)]
-                frame_buffer.append(kp)
+                if len(kp) == EXPECTED_FEATURES:
+                    pred = model.predict([kp])[0]
+                    pred_prob = max(model.predict_proba([kp])[0])
+                    text = f"Predicción: {pred} ({pred_prob*100:.1f}%)"
+                    mp_drawing.draw_landmarks(frame, best_hand, mp_hands.HAND_CONNECTIONS)
+                    cv2.putText(frame, text, (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
 
-            mp_drawing.draw_landmarks(frame, best_hand, mp_hands.HAND_CONNECTIONS)
-        else:
-            frame_buffer.clear()
-
-        prediction = ""
-        color = (150, 150, 150)
-
-        if len(frame_buffer) >= 10:
-            arr = np.mean(frame_buffer, axis=0).reshape(1, -1)
-            try:
-                proba = model.predict_proba(arr)[0]
-                max_proba = max(proba)
-                pred_class = model.classes_[np.argmax(proba)]
-
-                if max_proba >= CONF_THRESHOLD:
-                    prediction = pred_class
-                    color = (0, 255, 0)
-                else:
-                    prediction = ""
-
-            except Exception as e:
-                print(f"⚠ Error en predicción: {e}")
-
-        if prediction:
-            cv2.putText(frame, f"Seña: {prediction}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
-        else:
-            cv2.putText(frame, "Seña: --", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (100, 100, 100), 2)
-
-        cv2.imshow("Predicción en Vivo", frame)
-
-        key = cv2.waitKey(5) & 0xFF
-        if key == 27:  # ESC para salir
-            print("Saliendo del modo predicción...")
+        cv2.imshow("Predicción en vivo", frame)
+        if cv2.waitKey(1) & 0xFF == 27:
             break
 
     cap.release()
     cv2.destroyAllWindows()
 
 # ----------------------------
-# MENU PRINCIPAL
+# Menú principal
 # ----------------------------
 def menu():
     while True:
-        print("\n=== MENÚ ===")
+        print("\n--- Menú ---")
         print("1. Capturar muestras estáticas")
         print("2. Capturar muestras dinámicas")
         print("3. Entrenar modelo")
         print("4. Predicción en vivo")
-        print("0. Salir")
-        opt = input("Elegí una opción: ").strip()
+        print("5. Salir")
 
-        if opt == "1":
+        opcion = input("Elegí una opción (1-5): ").strip()
+        if opcion == '1':
             capturar_estaticas()
-        elif opt == "2":
+        elif opcion == '2':
             capturar_dinamicas()
-        elif opt == "3":
+        elif opcion == '3':
             entrenar_modelo()
-        elif opt == "4":
+        elif opcion == '4':
             predecir_en_vivo()
-        elif opt == "0":
+        elif opcion == '5':
             print("Saliendo...")
             break
         else:
-            print("Opción inválida.")
+            print("Opción inválida. Intentá de nuevo.")
 
 if __name__ == "__main__":
     menu()
