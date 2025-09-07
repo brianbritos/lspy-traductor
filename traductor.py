@@ -1,305 +1,159 @@
-# sign_language.py
+#!/usr/bin/env python3
+"""
+traductor.py - Predicción en vivo del modelo de señas
+Uso:
+    python traductor.py
+"""
+
 import os
-import sys
 import cv2
-import numpy as np
-import pandas as pd
-import joblib
-from collections import deque, Counter
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report
 import mediapipe as mp
+import numpy as np
+import joblib
+import tkinter as tk
+from tkinter import StringVar
+from PIL import Image, ImageTk
+from collections import deque, Counter
 
-# ---------------------------- UTILIDADES ----------------------------
-def get_base_path():
-    if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
-
-def read_csv_safe(path):
-    try:
-        return pd.read_csv(path)
-    except Exception as e:
-        print(f"Error leyendo {path}: {e}")
-        return None
-
-def get_closest_hand(landmarks_list):
-    min_dist_score = float('inf')
-    best_hand = None
-    for hand in landmarks_list:
-        xs = [lm.x for lm in hand.landmark]
-        ys = [lm.y for lm in hand.landmark]
-        z_mean = np.mean([lm.z for lm in hand.landmark])
-        dist_score = ((np.mean(xs)-0.5)**2 + (np.mean(ys)-0.5)**2)**0.5 + abs(z_mean)
-        if dist_score < min_dist_score:
-            min_dist_score = dist_score
-            best_hand = hand
-    return best_hand
-
-# ---------------------------- PATHS ----------------------------
-BASE_PATH = get_base_path()
-DATA_DIR = os.path.join(BASE_PATH, "data")
+# ------------------- CONFIGURACIÓN -------------------
+BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_PATH, "modelo.pkl")
-os.makedirs(DATA_DIR, exist_ok=True)
 
-# ---------------------------- CONFIG MEDIA PIPE ----------------------------
+CONF_THRESHOLD = 0.8       # Umbral de confianza
+BUFFER_SIZE = 5            # Suavizado de predicciones
+
+# ------------------- CARGA DEL MODELO -------------------
+if not os.path.exists(MODEL_PATH):
+    print("❌ No se encontró el modelo entrenado. Ejecuta primero 'entrenador.py' para generarlo.")
+    exit()
+
+try:
+    model = joblib.load(MODEL_PATH)
+except Exception as e:
+    print(f"❌ Error cargando modelo: {e}")
+    exit()
+
+LABELS = model.classes_
+
+# ------------------- MEDIAPIPE -------------------
 mp_hands = mp.solutions.hands
 mp_drawing = mp.solutions.drawing_utils
-EXPECTED_FEATURES = 63
-COLUMN_NAMES = [f"kp_{i}" for i in range(EXPECTED_FEATURES)] + ["label"]
+hands = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7, min_tracking_confidence=0.7)
 
-# ---------------------------- CAPTURA ESTÁTICA ----------------------------
-def capturar_estaticas():
-    try:
-        NUM_SAMPLES = int(input("Muestras estáticas: "))
-    except:
-        print("Número inválido.")
-        return
-    label = input("Label: ").strip().lower()
-    output_path = os.path.join(DATA_DIR, f"{label}.csv")
+# ------------------- FUNCIONES -------------------
+def extract_features(landmarks):
+    """Convierte landmarks en vector plano"""
+    coords = []
+    for lm in landmarks.landmark:
+        coords.extend([lm.x, lm.y, lm.z])
+    return np.array(coords).flatten()
 
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("No se pudo abrir la cámara.")
-        return
+def predict_sign(features, buffer):
+    """Predice seña con suavizado por buffer"""
+    if features is None:
+        return "Sin detección", 0.0
 
-    hands = mp_hands.Hands(static_image_mode=False, max_num_hands=2,
-                           min_detection_confidence=0.7, min_tracking_confidence=0.7)
-    samples = []
-    guardadas = 0
+    features = features.reshape(1, -1)
+    probs = model.predict_proba(features)[0]
+    max_prob = np.max(probs)
+    pred_label = LABELS[np.argmax(probs)]
 
-    while guardadas < NUM_SAMPLES:
-        ret, frame = cap.read()
+    if max_prob >= CONF_THRESHOLD:
+        buffer.append(pred_label)
+        final_label = Counter(buffer).most_common(1)[0][0]
+        return final_label, max_prob
+    return "Sin detección", max_prob
+
+# ------------------- GUI -------------------
+class SignApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Traductor de Lengua de Señas")
+
+        # Frame de video
+        self.video_label = tk.Label(root)
+        self.video_label.pack()
+
+        # Label de predicción
+        self.pred_var = StringVar()
+        self.pred_label = tk.Label(root, textvariable=self.pred_var, font=("Arial", 20))
+        self.pred_label.pack()
+
+        # Texto acumulado
+        self.text_var = StringVar()
+        self.text_label = tk.Label(root, textvariable=self.text_var, font=("Arial", 24))
+        self.text_label.pack()
+
+        # Botones
+        self.buttons_frame = tk.Frame(root)
+        self.buttons_frame.pack(pady=10)
+
+        self.toggle_button = tk.Button(self.buttons_frame, text="⏸️ Pausar registro", command=self.toggle_accum)
+        self.toggle_button.grid(row=0, column=0, padx=5)
+
+        self.clear_button = tk.Button(self.buttons_frame, text="🗑️ Borrar registro", command=self.clear_accum)
+        self.clear_button.grid(row=0, column=1, padx=5)
+
+        # Variables internas
+        self.text_accum = ""
+        self.register_enabled = True
+        self.cap = cv2.VideoCapture(0)
+        self.buffer = deque(maxlen=BUFFER_SIZE)
+
+        self.update_frame()
+
+    def toggle_accum(self):
+        """Activa o desactiva el registro de letras"""
+        self.register_enabled = not self.register_enabled
+        if self.register_enabled:
+            self.toggle_button.config(text="⏸️ Pausar registro")
+        else:
+            self.toggle_button.config(text="▶️ Reanudar registro")
+
+    def clear_accum(self):
+        """Limpia el texto acumulado"""
+        self.text_accum = ""
+        self.text_var.set("")
+
+    def update_frame(self):
+        ret, frame = self.cap.read()
         if not ret:
-            continue
+            self.root.after(10, self.update_frame)
+            return
+
         frame = cv2.flip(frame, 1)
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = hands.process(rgb)
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        hand_landmarks = get_closest_hand(results.multi_hand_landmarks) if results.multi_hand_landmarks else None
-        if hand_landmarks:
-            mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-
-        cv2.putText(frame, f"Guardadas: {guardadas}/{NUM_SAMPLES}", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
-        cv2.putText(frame, "Presiona 'c' para capturar, ESC para salir", (10,60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255),1)
-        cv2.imshow("Captura Estática", frame)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('c') and hand_landmarks:
-            burst = []
-            ok = True
-            for _ in range(10):
-                ret_b, f_b = cap.read()
-                if not ret_b:
-                    ok = False
-                    break
-                f_b = cv2.flip(f_b, 1)
-                r_b = hands.process(cv2.cvtColor(f_b, cv2.COLOR_BGR2RGB))
-                hand_b = get_closest_hand(r_b.multi_hand_landmarks) if r_b.multi_hand_landmarks else None
-                if hand_b is None or len(hand_b.landmark) != 21:
-                    ok = False
-                    break
-                kp = [c for lm in hand_b.landmark for c in (lm.x, lm.y, lm.z)]
-                burst.append(kp)
-            if ok and len(burst)==10 and np.var(np.array(burst), axis=0).mean() <= 0.0015:
-                samples.append(np.mean(np.array(burst), axis=0).tolist())
-                guardadas +=1
-                print(f"Guardadas {guardadas}/{NUM_SAMPLES}")
-            else:
-                print("Mano inestable. Reintenta.")
-        elif key == 27:
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-    if samples:
-        df = pd.DataFrame(samples, columns=[f"kp_{i}" for i in range(EXPECTED_FEATURES)])
-        df['label'] = label
-        if os.path.exists(output_path):
-            prev = read_csv_safe(output_path)
-            if prev is not None and set(prev.columns)==set(df.columns):
-                df = pd.concat([prev, df], ignore_index=True)
-        df.to_csv(output_path,index=False)
-        print(f"{len(samples)} muestras guardadas en {output_path}")
-
-# ---------------------------- CAPTURA DINÁMICA ----------------------------
-def capturar_dinamicas():
-    try:
-        NUM_SAMPLES = int(input("Secuencias dinámicas: "))
-        DURATION = float(input("Duración por secuencia (s): "))
-    except:
-        print("Entrada inválida.")
-        return
-    label = input("Label dinámico: ").strip().lower()
-    output_dir = os.path.join(DATA_DIR,label)
-    os.makedirs(output_dir,exist_ok=True)
-
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("No se pudo abrir la cámara.")
-        return
-    hands = mp_hands.Hands(static_image_mode=False,max_num_hands=2,min_detection_confidence=0.7,min_tracking_confidence=0.7)
-    guardadas=0
-    frames_per_seq = max(1,int(DURATION*30))
-
-    while guardadas<NUM_SAMPLES:
-        ret, frame = cap.read()
-        if not ret:
-            continue
-        frame = cv2.flip(frame,1)
-        cv2.putText(frame,f"Guardadas: {guardadas}/{NUM_SAMPLES}",(10,30),cv2.FONT_HERSHEY_SIMPLEX,0.8,(0,255,0),2)
-        cv2.putText(frame,"Presiona 'c' para grabar, ESC para salir",(10,60),cv2.FONT_HERSHEY_SIMPLEX,0.6,(255,255,255),1)
-        cv2.imshow("Captura Dinámica", frame)
-        key = cv2.waitKey(1) & 0xFF
-
-        if key==ord('c'):
-            seq=[]
-            validos=0
-            total=0
-            while total<frames_per_seq:
-                ret2,f2=cap.read()
-                if not ret2:
-                    break
-                f2=cv2.flip(f2,1)
-                res=hands.process(cv2.cvtColor(f2,cv2.COLOR_BGR2RGB))
-                total+=1
-                hand_b = get_closest_hand(res.multi_hand_landmarks) if res.multi_hand_landmarks else None
-                if hand_b and len(hand_b.landmark)==21:
-                    kp=[c for lm in hand_b.landmark for c in (lm.x,lm.y,lm.z)]
-                    seq.append(kp)
-                    validos+=1
-                    mp_drawing.draw_landmarks(f2,hand_b,mp_hands.HAND_CONNECTIONS)
-                cv2.putText(f2,f"Grabando secuencia {total}/{frames_per_seq}",(10,30),cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,0,255),2)
-                cv2.imshow("Captura Dinámica",f2)
-                if cv2.waitKey(1)&0xFF==27:
-                    cap.release()
-                    cv2.destroyAllWindows()
-                    return
-            ratio=(validos/total) if total>0 else 0
-            if ratio>=0.8 and len(seq)>0:
-                filename=os.path.join(output_dir,f"sample_{guardadas+1}.csv")
-                pd.DataFrame(seq).to_csv(filename,index=False)
-                guardadas+=1
-                print(f"Secuencia guardada: {filename} ({validos}/{total} válidos)")
-            else:
-                print(f"Secuencia descartada ({validos}/{total} válidos)")
-
-        elif key==27:
-            break
-    cap.release()
-    cv2.destroyAllWindows()
-    print("Captura dinámica finalizada.")
-
-# ---------------------------- ENTRENAMIENTO ----------------------------
-def cargar_estaticos():
-    files=[f for f in os.listdir(DATA_DIR) if f.endswith(".csv") and os.path.isfile(os.path.join(DATA_DIR,f))]
-    dfs=[]
-    for f in files:
-        df=read_csv_safe(os.path.join(DATA_DIR,f))
-        if df is not None and df.shape[1]==EXPECTED_FEATURES+1:
-            df.columns = COLUMN_NAMES
-            dfs.append(df)
-    return pd.concat(dfs,ignore_index=True) if dfs else pd.DataFrame()
-
-def entrenar_modelo():
-    static_df=cargar_estaticos()
-    dynamic_rows=[]
-    for entry in os.listdir(DATA_DIR):
-        folder=os.path.join(DATA_DIR,entry)
-        if os.path.isdir(folder):
-            for f in os.listdir(folder):
-                if f.endswith(".csv"):
-                    df=read_csv_safe(os.path.join(folder,f))
-                    if df is not None and df.shape[1]==EXPECTED_FEATURES:
-                        descriptor=df.mean().tolist()
-                        descriptor.append(entry)
-                        dynamic_rows.append(descriptor)
-    dynamic_df=pd.DataFrame(dynamic_rows,columns=COLUMN_NAMES) if dynamic_rows else pd.DataFrame()
-    dataset=pd.concat([static_df,dynamic_df],ignore_index=True) if not static_df.empty or not dynamic_df.empty else None
-    if dataset is None or dataset.empty:
-        print("No hay datos para entrenar")
-        return
-    X=dataset.iloc[:,:-1]
-    y=dataset.iloc[:,-1]
-    X_train,X_test,y_train,y_test=train_test_split(X,y,test_size=0.2,random_state=42)
-    model=RandomForestClassifier(n_estimators=100,random_state=42)
-    model.fit(X_train,y_train)
-    print(classification_report(y_test,model.predict(X_test)))
-    joblib.dump(model,MODEL_PATH)
-    print(f"Modelo guardado en {MODEL_PATH}")
-
-# ---------------------------- PREDICCIÓN EN VIVO ----------------------------
-def predecir_seña():
-    if not os.path.exists(MODEL_PATH):
-        print("No se encontró modelo entrenado.")
-        return
-    try:
-        model = joblib.load(MODEL_PATH)
-    except Exception as e:
-        print(f"Error cargando modelo: {e}")
-        return
-
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        print("No se pudo abrir la cámara.")
-        return
-
-    hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1,
-                           min_detection_confidence=0.7, min_tracking_confidence=0.7)
-    
-    BUFFER_SIZE = 5
-    label_buffer = deque(maxlen=BUFFER_SIZE)
-    
-    print("Presiona ESC para salir.")
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            continue
-        frame = cv2.flip(frame, 1)
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = hands.process(rgb)
-
-        label_pred = "No detectado"
+        # Procesar mano
+        results = hands.process(rgb_frame)
+        pred_label, prob = "Sin detección", 0.0
         if results.multi_hand_landmarks:
-            hand = get_closest_hand(results.multi_hand_landmarks)
-            kp = [c for lm in hand.landmark for c in (lm.x, lm.y, lm.z)]
-            if len(kp) == EXPECTED_FEATURES:
-                X = np.array(kp).reshape(1, -1)
-                try:
-                    pred = model.predict(X)[0]
-                    label_buffer.append(pred)
-                    label_pred = Counter(label_buffer).most_common(1)[0][0]
-                except Exception as e:
-                    print(f"Error predicción: {e}")
-                    label_pred = "Error"
-            mp_drawing.draw_landmarks(frame, hand, mp_hands.HAND_CONNECTIONS)
+            for hand_landmarks in results.multi_hand_landmarks:
+                features = extract_features(hand_landmarks)
+                pred_label, prob = predict_sign(features, self.buffer)
+                mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
 
-        cv2.putText(frame, f"Seña: {label_pred}", (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
-        cv2.imshow("Predicción", frame)
-        if cv2.waitKey(1) & 0xFF == 27:
-            break
+        # Mostrar resultados
+        if pred_label != "Sin detección":
+            self.pred_var.set(f"Seña: {pred_label} ({prob:.2f})")
+            if self.register_enabled:  # Solo acumula si está activado
+                if len(self.text_accum) == 0 or self.text_accum[-1] != pred_label:
+                    self.text_accum += pred_label
+        else:
+            self.pred_var.set("Sin detección")
 
-    cap.release()
-    cv2.destroyAllWindows()
+        self.text_var.set(self.text_accum)
 
-# ---------------------------- MENÚ ----------------------------
-def menu():
-    while True:
-        print("\n--- Menú ---")
-        print("1. Capturar estáticas")
-        print("2. Capturar dinámicas")
-        print("3. Entrenar modelo")
-        print("4. Predecir seña en vivo")
-        print("0. Salir")
-        choice=input("Opción: ").strip()
-        if choice=='1': capturar_estaticas()
-        elif choice=='2': capturar_dinamicas()
-        elif choice=='3': entrenar_modelo()
-        elif choice=='4': predecir_seña()
-        elif choice=='0': break
-        else: print("Opción inválida.")
+        # Convertir frame para Tkinter
+        img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        imgtk = ImageTk.PhotoImage(image=img)
+        self.video_label.imgtk = imgtk
+        self.video_label.configure(image=imgtk)
 
-if __name__=="__main__":
-    menu()
+        self.root.after(10, self.update_frame)
+
+# ------------------- MAIN -------------------
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = SignApp(root)
+    root.mainloop()
