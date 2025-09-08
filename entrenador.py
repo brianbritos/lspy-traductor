@@ -54,8 +54,32 @@ def get_closest_hand(landmarks_list):
 
 def extract_features_np(hand_landmarks):
     """Convierte landmarks en un vector NumPy de 63 valores (x,y,z)."""
-    return np.array([[lm.x, lm.y, lm.z] for lm in hand_landmarks.landmark],
-                    dtype=np.float32).ravel()
+    return np.array([[lm.x, lm.y, lm.z] for lm in hand_landmarks.landmark], dtype=np.float32).ravel()
+
+# ---------------------------- DATA AUGMENTATION ----------------------------
+def augment_landmarks(landmarks, scale_range=(0.9,1.1), rot_range=(-15,15), flip_prob=0.5):
+    """Genera una versión aumentada de los landmarks de la mano"""
+    coords = np.array([[lm.x, lm.y] for lm in landmarks.landmark])
+    center = coords.mean(axis=0)
+    coords -= center
+
+    # Escala
+    scale = np.random.uniform(*scale_range)
+    coords *= scale
+
+    # Rotación
+    angle = np.radians(np.random.uniform(*rot_range))
+    rot_matrix = np.array([[np.cos(angle), -np.sin(angle)],
+                           [np.sin(angle),  np.cos(angle)]])
+    coords = coords @ rot_matrix.T
+
+    # Flip horizontal (simula la otra mano)
+    if np.random.rand() < flip_prob:
+        coords[:,0] = -coords[:,0]
+
+    coords += center
+    z = np.array([lm.z for lm in landmarks.landmark]).reshape(-1,1)
+    return np.hstack([coords, z]).flatten()
 
 # ---------------------------- CAPTURA ESTÁTICA ----------------------------
 def capturar_estaticas():
@@ -109,12 +133,17 @@ def capturar_estaticas():
                 kp = extract_features_np(hand_b)
                 burst.append(kp)
             if len(burst) == 10 and np.var(np.array(burst), axis=0).mean() <= 0.0015:
-                samples.append(np.mean(np.array(burst), axis=0).tolist())
+                avg_kp = np.mean(np.array(burst), axis=0)
+                samples.append(avg_kp.tolist())
+                # Generar variantes aumentadas
+                for _ in range(2):  # 2 versiones aumentadas por muestra
+                    aug_kp = augment_landmarks(hand_b)
+                    samples.append(aug_kp.tolist())
                 guardadas += 1
-                print(f"Muestra {guardadas}/{num_samples} guardada.")
+                print(f"Muestra {guardadas}/{num_samples} guardada con aumentos.")
             else:
                 print("Mano inestable, intenta de nuevo.")
-        elif key == 27:  # ESC
+        elif key == 27:
             break
 
     cap.release()
@@ -175,6 +204,10 @@ def capturar_dinamicas():
                 if hand_b and len(hand_b.landmark) == 21:
                     kp = extract_features_np(hand_b)
                     seq.append(kp.tolist())
+                    # generar versiones aumentadas por frame
+                    for _ in range(1):
+                        aug_kp = augment_landmarks(hand_b)
+                        seq.append(aug_kp.tolist())
                     validos += 1
                     mp_drawing.draw_landmarks(f2, hand_b, mp_hands.HAND_CONNECTIONS)
                 cv2.imshow("Captura Dinámica", f2)
@@ -189,7 +222,7 @@ def capturar_dinamicas():
                 print(f"Secuencia guardada: {filename}")
             else:
                 print("Secuencia descartada (demasiados frames inválidos).")
-        elif key == 27:  # ESC
+        elif key == 27:
             break
 
     cap.release()

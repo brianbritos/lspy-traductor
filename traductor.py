@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-traductor.py - Predicción en vivo del modelo de señas
+traductor.py - Predicción en vivo del modelo de señas con Tkinter
+Umbral de confianza: 0.1
 Uso:
     python traductor.py
 """
@@ -18,19 +19,18 @@ from collections import deque, Counter
 # ------------------- CONFIGURACIÓN -------------------
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_PATH, "modelo.pkl")
-
-CONF_THRESHOLD = 0.8       # Umbral de confianza
+CONF_THRESHOLD = 0.7       # Umbral de confianza
 BUFFER_SIZE = 5            # Suavizado de predicciones
 
 # ------------------- CARGA DEL MODELO -------------------
 if not os.path.exists(MODEL_PATH):
-    print("❌ No se encontró el modelo entrenado. Ejecuta primero 'entrenador.py' para generarlo.")
+    print("No se encontró el modelo entrenado. Ejecuta primero 'sign_language.py' para generarlo.")
     exit()
 
 try:
     model = joblib.load(MODEL_PATH)
 except Exception as e:
-    print(f"❌ Error cargando modelo: {e}")
+    print(f"Error cargando modelo: {e}")
     exit()
 
 LABELS = model.classes_
@@ -49,7 +49,7 @@ def extract_features(landmarks):
     return np.array(coords).flatten()
 
 def predict_sign(features, buffer):
-    """Predice seña con suavizado por buffer"""
+    """Predice seña con suavizado por buffer y umbral"""
     if features is None:
         return "Sin detección", 0.0
 
@@ -63,6 +63,20 @@ def predict_sign(features, buffer):
         final_label = Counter(buffer).most_common(1)[0][0]
         return final_label, max_prob
     return "Sin detección", max_prob
+
+def get_closest_hand(landmarks_list):
+    """Selecciona la mano más centrada"""
+    min_dist_score = float('inf')
+    best_hand = None
+    for hand in landmarks_list:
+        xs = [lm.x for lm in hand.landmark]
+        ys = [lm.y for lm in hand.landmark]
+        z_mean = np.mean([lm.z for lm in hand.landmark])
+        dist_score = ((np.mean(xs)-0.7)**2 + (np.mean(ys)-0.7)**2)**0.7 + abs(z_mean)
+        if dist_score < min_dist_score:
+            min_dist_score = dist_score
+            best_hand = hand
+    return best_hand
 
 # ------------------- GUI -------------------
 class SignApp:
@@ -88,10 +102,10 @@ class SignApp:
         self.buttons_frame = tk.Frame(root)
         self.buttons_frame.pack(pady=10)
 
-        self.toggle_button = tk.Button(self.buttons_frame, text="⏸️ Pausar registro", command=self.toggle_accum)
+        self.toggle_button = tk.Button(self.buttons_frame, text="Pausar registro", command=self.toggle_accum)
         self.toggle_button.grid(row=0, column=0, padx=5)
 
-        self.clear_button = tk.Button(self.buttons_frame, text="🗑️ Borrar registro", command=self.clear_accum)
+        self.clear_button = tk.Button(self.buttons_frame, text="Borrar registro", command=self.clear_accum)
         self.clear_button.grid(row=0, column=1, padx=5)
 
         # Variables internas
@@ -103,15 +117,10 @@ class SignApp:
         self.update_frame()
 
     def toggle_accum(self):
-        """Activa o desactiva el registro de letras"""
         self.register_enabled = not self.register_enabled
-        if self.register_enabled:
-            self.toggle_button.config(text="⏸️ Pausar registro")
-        else:
-            self.toggle_button.config(text="▶️ Reanudar registro")
+        self.toggle_button.config(text="Pausar registro" if self.register_enabled else "Reanudar registro")
 
     def clear_accum(self):
-        """Limpia el texto acumulado"""
         self.text_accum = ""
         self.text_var.set("")
 
@@ -124,24 +133,22 @@ class SignApp:
         frame = cv2.flip(frame, 1)
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        # Procesar mano
         results = hands.process(rgb_frame)
         pred_label, prob = "Sin detección", 0.0
+
         if results.multi_hand_landmarks:
-            for hand_landmarks in results.multi_hand_landmarks:
+            hand_landmarks = get_closest_hand(results.multi_hand_landmarks)
+            if hand_landmarks:
                 features = extract_features(hand_landmarks)
                 pred_label, prob = predict_sign(features, self.buffer)
                 mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
 
         # Mostrar resultados
-        if pred_label != "Sin detección":
-            self.pred_var.set(f"Seña: {pred_label} ({prob:.2f})")
-            if self.register_enabled:  # Solo acumula si está activado
-                if len(self.text_accum) == 0 or self.text_accum[-1] != pred_label:
-                    self.text_accum += pred_label
-        else:
-            self.pred_var.set("Sin detección")
+        self.pred_var.set(f"Seña: {pred_label} ({prob:.2f})" if pred_label != "Sin detección" else "Sin detección")
 
+        if self.register_enabled and pred_label != "Sin detección":
+            if len(self.text_accum) == 0 or self.text_accum[-1] != pred_label:
+                self.text_accum += pred_label
         self.text_var.set(self.text_accum)
 
         # Convertir frame para Tkinter
