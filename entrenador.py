@@ -52,6 +52,11 @@ def get_closest_hand(landmarks_list):
             best_hand = hand
     return best_hand
 
+def extract_features_np(hand_landmarks):
+    """Convierte landmarks en un vector NumPy de 63 valores (x,y,z)."""
+    return np.array([[lm.x, lm.y, lm.z] for lm in hand_landmarks.landmark],
+                    dtype=np.float32).ravel()
+
 # ---------------------------- CAPTURA ESTÁTICA ----------------------------
 def capturar_estaticas():
     try:
@@ -101,7 +106,7 @@ def capturar_estaticas():
                 hand_b = get_closest_hand(r_b.multi_hand_landmarks) if r_b.multi_hand_landmarks else None
                 if hand_b is None or len(hand_b.landmark) != 21:
                     break
-                kp = [c for lm in hand_b.landmark for c in (lm.x, lm.y, lm.z)]
+                kp = extract_features_np(hand_b)
                 burst.append(kp)
             if len(burst) == 10 and np.var(np.array(burst), axis=0).mean() <= 0.0015:
                 samples.append(np.mean(np.array(burst), axis=0).tolist())
@@ -168,8 +173,8 @@ def capturar_dinamicas():
                 total += 1
                 hand_b = get_closest_hand(res.multi_hand_landmarks) if res.multi_hand_landmarks else None
                 if hand_b and len(hand_b.landmark) == 21:
-                    kp = [c for lm in hand_b.landmark for c in (lm.x, lm.y, lm.z)]
-                    seq.append(kp)
+                    kp = extract_features_np(hand_b)
+                    seq.append(kp.tolist())
                     validos += 1
                     mp_drawing.draw_landmarks(f2, hand_b, mp_hands.HAND_CONNECTIONS)
                 cv2.imshow("Captura Dinámica", f2)
@@ -223,7 +228,7 @@ def entrenar_modelo():
 
     X, y = dataset.iloc[:, :-1], dataset.iloc[:, -1]
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
     model.fit(X_train, y_train)
 
     print("\n--- Resultados de validación ---")
