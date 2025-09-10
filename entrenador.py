@@ -52,35 +52,6 @@ def get_closest_hand(landmarks_list):
             best_hand = hand
     return best_hand
 
-def extract_features_np(hand_landmarks):
-    """Convierte landmarks en un vector NumPy de 63 valores (x,y,z)."""
-    return np.array([[lm.x, lm.y, lm.z] for lm in hand_landmarks.landmark], dtype=np.float32).ravel()
-
-# ---------------------------- DATA AUGMENTATION ----------------------------
-def augment_landmarks(landmarks, scale_range=(0.9,1.1), rot_range=(-15,15), flip_prob=0.5):
-    """Genera una versión aumentada de los landmarks de la mano"""
-    coords = np.array([[lm.x, lm.y] for lm in landmarks.landmark])
-    center = coords.mean(axis=0)
-    coords -= center
-
-    # Escala
-    scale = np.random.uniform(*scale_range)
-    coords *= scale
-
-    # Rotación
-    angle = np.radians(np.random.uniform(*rot_range))
-    rot_matrix = np.array([[np.cos(angle), -np.sin(angle)],
-                           [np.sin(angle),  np.cos(angle)]])
-    coords = coords @ rot_matrix.T
-
-    # Flip horizontal (simula la otra mano)
-    if np.random.rand() < flip_prob:
-        coords[:,0] = -coords[:,0]
-
-    coords += center
-    z = np.array([lm.z for lm in landmarks.landmark]).reshape(-1,1)
-    return np.hstack([coords, z]).flatten()
-
 # ---------------------------- CAPTURA ESTÁTICA ----------------------------
 def capturar_estaticas():
     try:
@@ -130,20 +101,15 @@ def capturar_estaticas():
                 hand_b = get_closest_hand(r_b.multi_hand_landmarks) if r_b.multi_hand_landmarks else None
                 if hand_b is None or len(hand_b.landmark) != 21:
                     break
-                kp = extract_features_np(hand_b)
+                kp = [c for lm in hand_b.landmark for c in (lm.x, lm.y, lm.z)]
                 burst.append(kp)
             if len(burst) == 10 and np.var(np.array(burst), axis=0).mean() <= 0.0015:
-                avg_kp = np.mean(np.array(burst), axis=0)
-                samples.append(avg_kp.tolist())
-                # Generar variantes aumentadas
-                for _ in range(2):  # 2 versiones aumentadas por muestra
-                    aug_kp = augment_landmarks(hand_b)
-                    samples.append(aug_kp.tolist())
+                samples.append(np.mean(np.array(burst), axis=0).tolist())
                 guardadas += 1
-                print(f"Muestra {guardadas}/{num_samples} guardada con aumentos.")
+                print(f"Muestra {guardadas}/{num_samples} guardada.")
             else:
                 print("Mano inestable, intenta de nuevo.")
-        elif key == 27:
+        elif key == 27:  # ESC
             break
 
     cap.release()
@@ -202,12 +168,8 @@ def capturar_dinamicas():
                 total += 1
                 hand_b = get_closest_hand(res.multi_hand_landmarks) if res.multi_hand_landmarks else None
                 if hand_b and len(hand_b.landmark) == 21:
-                    kp = extract_features_np(hand_b)
-                    seq.append(kp.tolist())
-                    # generar versiones aumentadas por frame
-                    for _ in range(1):
-                        aug_kp = augment_landmarks(hand_b)
-                        seq.append(aug_kp.tolist())
+                    kp = [c for lm in hand_b.landmark for c in (lm.x, lm.y, lm.z)]
+                    seq.append(kp)
                     validos += 1
                     mp_drawing.draw_landmarks(f2, hand_b, mp_hands.HAND_CONNECTIONS)
                 cv2.imshow("Captura Dinámica", f2)
@@ -222,7 +184,7 @@ def capturar_dinamicas():
                 print(f"Secuencia guardada: {filename}")
             else:
                 print("Secuencia descartada (demasiados frames inválidos).")
-        elif key == 27:
+        elif key == 27:  # ESC
             break
 
     cap.release()
@@ -261,7 +223,7 @@ def entrenar_modelo():
 
     X, y = dataset.iloc[:, :-1], dataset.iloc[:, -1]
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    model = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
     model.fit(X_train, y_train)
 
     print("\n--- Resultados de validación ---")
